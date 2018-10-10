@@ -54,6 +54,44 @@ typedef struct {
 
 typedef void sigactionhandler_t(int, siginfo_t*, void*);
 
+// pid のプロセスの addr の位置に HW BP を設置する。 DRr 番を用いる
+bool set_hw_breakpoint_to(pid_t pid, unsigned int addr, int r) {
+  if (!(0 <= r && r < 4)) {
+    return false;
+  }
+
+  // PTRACE_POKEUSER: USER領域に書き込み
+  // DRr に addr を書き込む
+  if (ptrace(PTRACE_POKEUSER, pid, offsetof(struct user, u_debugreg[r]), addr) != 0) {
+    return false;
+  }
+
+  // 必要な情報を書き込む
+  dr7_t dr7 = {0};
+  if (r == 0) {
+    dr7.l0 = 1;   // local enable for braekpoint in DR0
+    dr7.rw0 = DR7_BREAK_ON_EXEC;
+    dr7.len0 = DR7_LEN_1;   // breakpoint is 1 bytes long 
+  } else if (r == 1) {
+    dr7.l1 = 1;
+    dr7.rw1 = DR7_BREAK_ON_EXEC;
+    dr7.len1 = DR7_LEN_1;
+  } else if (r == 2) {
+    dr7.l2 = 1;
+    dr7.rw2 = DR7_BREAK_ON_EXEC;
+    dr7.len2 = DR7_LEN_1;
+  } else if (r == 3) {
+    dr7.l3 = 1;
+    dr7.rw3 = DR7_BREAK_ON_EXEC;
+    dr7.len3 = DR7_LEN_1;
+  }
+
+  if (ptrace(PTRACE_POKEUSER, pid, offsetof(struct user, u_debugreg[7]), dr7) != 0) {
+    return false;
+  }
+  return true;
+}
+
 // 子プロセスで PTRACE_TRACEME を使用して ATTTACH できるようにしてからターゲットを exec する
 // 親プロセスでは 子プロセスに PTRACE_ATTACH して PTRACE_POKEUSER を利用して ハードウェアブレークポイントを仕掛ける
 // long ptrace(enum __ptrace_request request, pid_t pid, void *addr, void *data);
@@ -72,26 +110,15 @@ int main(int argc, char **argv, char **envp)
   // 親プロセス
   waitpid(pid, &status, 0);  // 子プロセスのexecve 時のSIGTRAP を呼び出しを待つ。 
 
-  // PTRACE_POKEUSER: USER領域に書き込み
-  // DR0 に addr を書き込む
-  if (ptrace(PTRACE_POKEUSER, pid, offsetof(struct user, u_debugreg[0]), break_addr) != 0) {
-    fprintf(stderr, "[-]PTRACE_POKEUSER: %d (%s)\n", errno, strerror(errno));
-    exit(EXIT_FAILURE);
-  }
-  fprintf(stderr, "[+]attached to pid(%ld)\n", pid);
 
-  // DR7 に必要な情報を書き込む
-  dr7_t dr7 = {0};
-  dr7.l0 = 1;   // local enable for braekpoint in DR0
-  dr7.rw0 = DR7_BREAK_ON_EXEC;
-  dr7.len0 = DR7_LEN_1;   // breakpoint is 4 bytes long 
-  if (ptrace(PTRACE_POKEUSER, pid, offsetof(struct user, u_debugreg[7]), dr7) != 0) {
-    fprintf(stderr, "[-]PTRACE_POKEUSER2: %d (%s)\n", errno, strerror(errno));
+  // Hardware Breakpoint を設定する
+  if (!set_hw_breakpoint_to(pid, break_addr, 0)) {
+    fprintf(stderr, "[-]set hardware breakpoint: %d (%s)\n", errno, strerror(errno));
     exit(EXIT_FAILURE);
   }
 
   // Breakpoint を書き込んだので CONT
-  // DETACH すると TRACEME が消える
+  // DETACH すると TRACEME が消えちゃうのでだめ
   if (ptrace(PTRACE_CONT, pid, NULL, NULL) != 0) {
     fprintf(stderr, "[-]PTRACE_CONT: %d (%s)\n", errno, strerror(errno));
     exit(EXIT_FAILURE);
